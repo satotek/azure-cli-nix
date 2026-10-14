@@ -50,6 +50,24 @@ The Container Apps wheel pins Kubernetes 24.2.0, but the pinned nixpkgs provides
 35.0.0. This flake relaxes that dependency constraint. Command loading is tested;
 live operations using the Kubernetes client need separate validation.
 
+## Weekly updates
+
+The Update nixpkgs workflow runs every Thursday at 03:23 JST and can also be
+started manually. It updates nixpkgs, validates the same lock file on all three
+platforms, and publishes the outputs before creating and merging an update PR.
+A failed platform blocks the merge. A concurrent change to main also blocks it
+and requires a new run.
+
+The schedule avoids the start of the hour and leaves time before 09:00 JST.
+GitHub may delay scheduled runs, so completion by 09:00 is not guaranteed.
+
+Configure the Cachix variable and secret described below. In GitHub repository
+Settings > Actions > General, enable **Allow GitHub Actions to create and
+approve pull requests**. Branch protection must permit the verified update PR
+to merge; the workflow does not bypass protection rules. Updates made with
+GITHUB_TOKEN do not trigger a new push workflow, so validation and cache
+publication are completed within the update workflow itself.
+
 Front Door Standard/Premium uses built-in `az afd` commands. The Classic
 `front-door` extension is not included. `communication` is also not included
 because it is not packaged in the pinned nixpkgs extension set.

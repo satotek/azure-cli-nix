@@ -1,0 +1,131 @@
+name: Update nixpkgs
+
+on:
+  schedule:
+    - cron: '23 18 * * 3' # Thursday 03:23 JST; leave time before 09:00
+  workflow_dispatch:
+
+concurrency:
+  group: update-nixpkgs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.lock.outputs.changed }}
+      revision: ${{ steps.lock.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: Update locked nixpkgs
+        id: lock
+        run: |
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          nix flake update nixpkgs
+          if git diff --quiet -- flake.lock; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: steps.lock.outputs.changed == 'true'
+        with:
+          name: updated-lock
+          path: flake.lock
+          retention-days: 7
+
+  validate:
+    needs: update
+    if: needs.update.outputs.changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+          - runner: ubuntu-24.04-arm
+          - runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.update.outputs.revision }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: updated-lock
+          path: .
+      - uses: cachix/install-nix-action@v31
+      - name: Require cache publication configuration
+        env:
+          CACHE_NAME: ${{ vars.CACHIX_CACHE }}
+          CACHE_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHE_NAME" ] || [ -z "$CACHE_TOKEN" ]; then
+            echo 'CACHIX_CACHE and CACHIX_AUTH_TOKEN must be configured.' >&2
+            exit 1
+          fi
+      - uses: cachix/cachix-action@v16
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - run: nix build --print-build-logs
+      - run: nix run . -- --version
+      - run: nix run . -- extension list --query '[].name' --output tsv
+      - name: Check command loading without credentials
+        env:
+          AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no'
+        run: |
+          nix run . -- containerapp revision list --help
+          nix run . -- monitor app-insights query --help
+          nix run . -- graph query --help
+          nix run . -- monitor log-analytics query --help
+      - run: nix flake check --no-build
+      # Explicitly finish uploading before allowing the merge job to run.
+      - run: cachix push "$CACHE_NAME" result
+        env:
+          CACHE_NAME: ${{ vars.CACHIX_CACHE }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  merge:
+    needs: [update, validate]
+    if: needs.update.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.update.outputs.revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: updated-lock
+          path: .
+      - name: Publish verified update and merge its pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REVISION: ${{ needs.update.outputs.revision }}
+        run: |
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$BASE_REVISION" ]; then
+            echo 'main changed during validation; rerun against the new revision.' >&2
+            exit 1
+          fi
+          branch="chore/update-nixpkgs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch -c "$branch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add flake.lock
+          git commit -m 'chore(nix): update nixpkgs after cross-platform validation'
+          git push origin "$branch"
+          pr=$(gh pr create --base main --head "$branch" \
+            --title 'chore(nix): update nixpkgs' \
+            --body 'Weekly nixpkgs update. Builds and command-loading checks passed on Linux x86_64, Linux ARM64, and Apple Silicon macOS. Outputs were published to Cachix before this PR was created.')
+          gh pr merge "$pr" --squash --delete-branch --match-head-commit "$(git rev-parse HEAD)"
