@@ -11,7 +11,29 @@
     {
       packages = forAllSystems (system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [
+              (final: prev: {
+                pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+                  (pyFinal: pyPrev: {
+                    # nixpkgs marks fabric 3.2.x broken with invoke >= 3
+                    # (https://github.com/fabric/fabric/issues/2376), and azure-cli
+                    # depends on fabric. Pin invoke to 2.x for the whole Python set
+                    # (paramiko also depends on it, so a fabric-only pin duplicates it).
+                    invoke = pyPrev.invoke.overridePythonAttrs (old: rec {
+                      version = "2.2.1";
+                      src = final.fetchPypi {
+                        pname = "invoke";
+                        inherit version;
+                        hash = "sha256-UVv0m0pIkyt5sCRZA0jaIvOcSULf+ZGtH7i4uuob5wc=";
+                      };
+                    });
+                  })
+                ];
+              })
+            ];
+          };
           # Avoid runtime pip installation in the immutable Nix store.
           devops = pkgs.azure-cli.extensions.azure-devops.overridePythonAttrs (old: {
             propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [ pkgs.python3Packages.keyring ];
